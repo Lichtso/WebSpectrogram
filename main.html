@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>CCWT</title>
+        <link rel="stylesheet" type="text/css" href="main.css">
+        <script type="module">
+            import {getIndexOfFrequency, getFrequencyAtIndex, doCCWT} from './CCWT.js';
+            import {gl, initRenderer, resizeCanvas, setRendererParameter, renderFrame} from'./Renderer.js';
+
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)(),
+                  options = {
+                'FrequencyBandMin': 20,
+                'FrequencyBandMax': 20000,
+                'FrequencyBandBasis': 2,
+                'DimensionsPadding': 50,
+                'DimensionsTime': 200,
+                'DimensionsFrequency': 700,
+                'DisplayFactor': 30.0,
+                'DisplayGamma': 1.0,
+                'DisplayScheme': 'Magnitude',
+                'DisplayFormat': 'Horizontal',
+                'DisplayMarker': true,
+                'ToolsMusicalKeyboard': true,
+                'ToolsOvertones': true,
+            }, channelNames = {
+                '1': ['Mono'],
+                '2': ['L', 'R'],
+                '4': ['L', 'R', 'SL', 'SR'],
+                '6': ['L', 'R', 'C', 'LFE', 'SL', 'SR']
+            };
+            let ccwt, audioRecorder, audioBuffer, audioBufferSource, playbackStartedAt;
+
+            function showProgress(message, value=0.0) {
+                document.getElementById('Message').innerText = message;
+                document.getElementById('Progress').value = value;
+            }
+
+            function fileFromReader(file) {
+                const reader = new FileReader();
+                decodeFile(reader);
+                reader.readAsArrayBuffer(file);
+            }
+
+            function setHoursMinutesSeconds(id, seconds) {
+                function twoDigits(value) {
+                    return (value > 9) ? value : `0${value}`;
+                }
+                document.getElementById(id).value = [twoDigits(Math.floor(seconds/3600)), twoDigits(Math.floor(seconds%3600/60)), twoDigits(Math.ceil(seconds)%60)].join(':');
+            }
+
+            function getHoursMinutesSeconds(id, seconds) {
+                const value = document.getElementById(id).value.split(':').map(x => parseInt(x));
+                return value[0]*3600+value[1]*60+value[2];
+            }
+
+            function updateInputOptionsView() {
+                setHoursMinutesSeconds('InputBegin', 0);
+                setHoursMinutesSeconds('InputEnd', Math.ceil(audioBuffer.duration));
+                const channels = channelNames[audioBuffer.numberOfChannels],
+                      channelSelect = document.getElementById('InputChannel');
+                while(channelSelect.childNodes.length > 0)
+                    channelSelect.removeChild(channelSelect.childNodes[0]);
+                for(let i = 0; i < channels.length; ++i) {
+                    const option = document.createElement('option');
+                    option.value = i;
+                    option.innerText = channels[i];
+                    channelSelect.appendChild(option);
+                }
+            }
+
+            function decodeFile(reader) {
+                showProgress('Loading File');
+                document.getElementById('StartView').style = 'display: none;';
+                document.getElementById('ProgressView').style = '';
+                reader.addEventListener('progress', (event) => {
+                    showProgress('Loading File', event.loaded/event.total);
+                });
+                reader.addEventListener('load', (event) => {
+                    showProgress('Decoding File');
+                    audioContext.decodeAudioData(event.target.response || event.target.result, (_audioBuffer) => {
+                        audioBuffer = _audioBuffer;
+                        updateInputOptionsView();
+                        document.getElementById('ProgressView').style = 'display: none;';
+                        document.getElementById('InputOptionsView').style = '';
+                    }, () => {
+                        showProgress('File Format is not Supported');
+                    });
+                });
+                reader.addEventListener('error', (event) => {
+                    showProgress('Could not Load File');
+                });
+            }
+
+            function analyzeSignal(event) {
+                event.stopPropagation();
+                event.preventDefault();
+                document.getElementById('InputOptionsView').style = 'display: none;';
+                document.getElementById('ProgressView').style = '';
+                const config = Object.assign({}, options);
+                config.InputChannel = parseInt(document.getElementById('InputChannel').value);
+                config.InputBegin = getHoursMinutesSeconds('InputBegin');
+                config.InputEnd = getHoursMinutesSeconds('InputEnd');
+                ccwt = doCCWT(config, gl, audioBuffer, showProgress);
+                ccwt.promise.then(initCanvas);
+            }
+
+            function createSvgElement(tag, parent) {
+                const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+                parent.appendChild(element);
+                return element;
+            }
+
+            function updateOverlayOffset() {
+                document.getElementById('OverlayOffset').style.transform = (options.DisplayFormat == 'Horizontal')
+                    ? `translateY(${Math.max(0, window.innerHeight-ccwt.config.DimensionsFrequency)/2-window.scrollY}px)`
+                    : `translateX(${Math.max(0, window.innerWidth-ccwt.config.DimensionsFrequency)/2-window.scrollX}px)`;
+            }
+
+            function updateDisplayFormat() {
+                if(!ccwt)
+                    return;
+                document.getElementById('Spacer').setAttribute('class', (options.DisplayFormat == 'Horizontal') ? 'horizontal' : 'vertical');
+                if(options.DisplayFormat == 'Horizontal')
+                    document.getElementById('Spacer').style = `width: calc(${ccwt.outputSampleCount}px + 100%); height: ${ccwt.config.DimensionsFrequency}px;`;
+                else
+                    document.getElementById('Spacer').style = `width: ${ccwt.config.DimensionsFrequency}px; height: ${ccwt.outputSampleCount}px; top: 100%;`;
+                updateScrollPosition();
+                updateOverlayOffset();
+                document.getElementById('Marker').setAttribute('d', (!options.DisplayMarker) ? '' : (options.DisplayFormat == 'Horizontal')
+                    ? `M${window.innerWidth/2} 0V${ccwt.config.DimensionsFrequency}`
+                    : `M0 ${window.innerHeight/2}H${ccwt.config.DimensionsFrequency}`
+                );
+                const musicOverlays = document.getElementById('MusicOverlays');
+                while(musicOverlays.childNodes.length > 0)
+                    musicOverlays.removeChild(musicOverlays.childNodes[0]);
+                const dimensionNames = (options.DisplayFormat == 'Horizontal') ? ['x', 'y', 'width', 'height'] : ['y', 'x', 'height', 'width'],
+                      overtones = createSvgElement('path', musicOverlays);
+                overtones.id = 'Overtones';
+                overtones.setAttribute('style', 'stroke: #F44;');
+                if(ccwt.config.FrequencyBandBasis != 2 || !options.ToolsMusicalKeyboard)
+                    return;
+                const octaveSize = ccwt.config.DimensionsFrequency/Math.log2(ccwt.config.FrequencyBandMax/ccwt.config.FrequencyBandMin),
+                      octaveIndexBegin = 0, // Math.log2(ccwt.config.FrequencyBandMin)-Math.log2(16.35)
+                      octaveIndexEnd = 10, // Math.log2(ccwt.config.FrequencyBandMax)-Math.log2(16.35)
+                      whiteKeys = createSvgElement('g', musicOverlays),
+                      blackKeys = createSvgElement('g', musicOverlays),
+                      labels = createSvgElement('g', musicOverlays);
+                whiteKeys.setAttribute('style', 'fill: white; stroke: black;');
+                blackKeys.setAttribute('style', 'fill: black; stroke: black;');
+                labels.setAttribute('style', `font-size: ${octaveSize*0.08}px;`);
+                for(let octaveIndex = octaveIndexBegin; octaveIndex < octaveIndexEnd; ++octaveIndex) {
+                    let octavePosition = (octaveIndex+Math.log2(16.35/ccwt.config.FrequencyBandMin))*octaveSize;
+                    if(options.DisplayFormat == 'Horizontal')
+                        octavePosition = ccwt.config.DimensionsFrequency-octavePosition;
+                    for(let i = 0; i < 7; ++i) {
+                        const rect = createSvgElement('rect', whiteKeys);
+                        rect.setAttribute(dimensionNames[0], 0);
+                        rect.setAttribute(dimensionNames[1], octavePosition+((options.DisplayFormat == 'Horizontal') ? -octaveSize*0.1-octaveSize/7*i : -octaveSize*0.05+octaveSize/7*i));
+                        rect.setAttribute(dimensionNames[2], octaveSize*0.8);
+                        rect.setAttribute(dimensionNames[3], octaveSize/7);
+                    }
+                    for(let i = 0; i < 5; ++i) {
+                        const rect = createSvgElement('rect', blackKeys);
+                        rect.setAttribute(dimensionNames[0], 0);
+                        rect.setAttribute(dimensionNames[1], octavePosition-octaveSize/24+octaveSize/6*(i + (i < 2 ? 0.5 : 1.0))*((options.DisplayFormat == 'Horizontal') ? -1 : 1));
+                        rect.setAttribute(dimensionNames[2], octaveSize*0.5);
+                        rect.setAttribute(dimensionNames[3], octaveSize/12);
+                    }
+                    for(let i = 0; i < 7; ++i) {
+                        const label = createSvgElement('text', labels);
+                        label.setAttribute(dimensionNames[0], octaveSize*0.6);
+                        label.setAttribute(dimensionNames[1], octavePosition+((options.DisplayFormat == 'Horizontal') ? octaveSize*0.01-octaveSize/7*i : octaveSize*0.025+octaveSize/7*i));
+                        label.textContent = ['C', 'D', 'E', 'F', 'G', 'A', 'B'][i]+' '+octaveIndex;
+                    }
+                }
+            }
+
+            function initCanvas() {
+                ccwt.playbackTime = ccwt.config.InputBegin;
+                const spacer = document.getElementById('Spacer');
+                spacer.onclick = (event) => {
+                    if(audioBufferSource)
+                        stopPlayback();
+                    else
+                        startPlayback();
+                };
+                spacer.onmousemove = (event) => {
+                    document.getElementById('MusicOverlays').style.transform = (options.DisplayFormat == 'Horizontal') ? `translateX(${event.clientX}px)` : `translateY(${event.clientY}px)`;
+                    const bounds = document.getElementById('Spacer').getBoundingClientRect(),
+                          overtones = document.getElementById('Overtones'),
+                          overtoneCount = 10,
+                          frequency = getFrequencyAtIndex(ccwt, (options.DisplayFormat == 'Horizontal')
+                            ? ccwt.config.DimensionsFrequency-event.pageY+Math.max(0, window.innerHeight-ccwt.config.DimensionsFrequency)/2
+                            : event.pageX-Math.max(0, window.innerWidth-ccwt.config.DimensionsFrequency)/2
+                          )[0];
+                    let data = '';
+                    if(options.ToolsOvertones)
+                        for(let i = 1; i <= overtoneCount; ++i) {
+                            const offset = getIndexOfFrequency(ccwt, i*frequency);
+                            data += (options.DisplayFormat == 'Horizontal') ? `M0,${ccwt.config.DimensionsFrequency-offset}H${-ccwt.config.DimensionsTime}` : `M${offset},0V${-ccwt.config.DimensionsTime}`;
+                        }
+                    overtones.setAttribute('d', data);
+                };
+                document.onscroll = () => {
+                    updateOverlayOffset();
+                    if(audioBufferSource)
+                        return;
+                    ccwt.playbackTime = window[(options.DisplayFormat == 'Horizontal') ? 'scrollX' : 'scrollY']/ccwt.outputSampleCount*ccwt.duration;
+                    if(options.DisplayFormat != 'Horizontal')
+                        ccwt.playbackTime = ccwt.duration-ccwt.playbackTime;
+                    ccwt.playbackTime += ccwt.config.InputBegin;
+                    renderFrame(ccwt, options);
+                };
+                document.getElementById('ProgressView').style = 'display: none;';
+                window.onresize = () => {
+                    resizeCanvas();
+                    updateDisplayFormat();
+                    renderFrame(ccwt, options);
+                };
+                window.onresize();
+            }
+
+            function loadOption(id) {
+                const element = document.getElementById(id);
+                if(element.tagName == 'SELECT') {
+                    for(const child of element.childNodes)
+                        if(child.value == options[id])
+                            child.selected = true;
+                } else if(element.tagName == 'INPUT')
+                    switch(element.type) {
+                        case 'text':
+                            element.value = options[id];
+                        break;
+                        case 'checkbox':
+                            element.checked = options[id];
+                        break;
+                        case 'range':
+                            element.value = Math.log(options[id])/Math.log(element.getAttribute('basis'));
+                        break;
+                    }
+            }
+
+            function loadOptions() {
+                for(const id in options)
+                    loadOption(id);
+            }
+
+            function saveOption(id) {
+                const element = document.getElementById(id);
+                if(element.tagName == 'SELECT') {
+                    for(const child of element.childNodes)
+                        if(child.selected)
+                            options[id] = child.value;
+                } else if(element.tagName == 'INPUT')
+                    switch(element.type) {
+                        case 'text':
+                            options[id] = parseFloat(element.value);
+                        break;
+                        case 'checkbox':
+                            options[id] = element.checked;
+                        break;
+                        case 'range':
+                            options[id] = Math.pow(element.getAttribute('basis'), parseFloat(element.value));
+                        break;
+                    }
+            }
+
+            function saveOptions(event) {
+                event.stopPropagation();
+                event.preventDefault();
+                for(const id in options)
+                    saveOption(id);
+                updateDisplayFormat();
+                renderFrame(ccwt, options);
+                document.getElementById('OptionsView').style = 'display: none;';
+                document.getElementById('ShowOptions').style = '';
+            }
+
+            function updateScrollPosition() {
+                let offset = ccwt.playbackTime-ccwt.config.InputBegin;
+                if(options.DisplayFormat == 'Horizontal')
+                    window.scrollTo(offset/ccwt.duration*ccwt.outputSampleCount, window.scrollY);
+                else
+                    window.scrollTo(window.scrollX, (1.0-offset/ccwt.duration)*ccwt.outputSampleCount);
+            }
+
+            function playbackAnimation(timestamp) {
+                ccwt.playbackTime = timestamp*0.001-playbackStartedAt;
+                updateScrollPosition();
+                renderFrame(ccwt, options);
+                if(audioBufferSource)
+                    window.requestAnimationFrame(playbackAnimation);
+            }
+
+            function startPlayback() {
+                const remainingDuration = ccwt.duration+ccwt.config.InputBegin-ccwt.playbackTime;
+                if(remainingDuration <= 0.0)
+                    return;
+                if(audioBufferSource)
+                    audioBufferSource.stop();
+                audioBufferSource = audioContext.createBufferSource();
+                audioBufferSource.buffer = ccwt.audioBuffer;
+                audioBufferSource.connect(audioContext.destination);
+                audioBufferSource.start(0, ccwt.playbackTime, remainingDuration);
+                audioBufferSource.onended = stopPlayback;
+                const timestamp = performance.now();
+                playbackStartedAt = timestamp*0.001-ccwt.playbackTime;
+                playbackAnimation(timestamp);
+            }
+
+            function stopPlayback() {
+                if(!audioBufferSource)
+                    return;
+                audioBufferSource.stop();
+                audioBufferSource = undefined;
+            }
+
+            document.body.onload = () => {
+                initRenderer(document.getElementById('Canvas'));
+                loadOptions();
+                document.getElementById('StartView').ondragover = (event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    if(event.dataTransfer.types.indexOf('Files') != -1)
+                        event.dataTransfer.dropEffect = 'copy';
+                };
+                document.getElementById('StartView').ondrop = (event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    fileFromReader(event.dataTransfer.files[0]);
+                };
+                document.getElementById('FileSelect').onchange = (event) => {
+                    fileFromReader(event.target.files[0]);
+                };
+                document.getElementById('StartRecording').onclick = (event) => {
+                    document.getElementById('StartView').style = 'display: none;';
+                    document.getElementById('ProgressView').style = '';
+                    navigator.mediaDevices.getUserMedia({'audio': true}).then((mediaStream) => {
+                        audioRecorder = {'buffers': []};
+                        audioRecorder.mediaStreamSource = audioContext.createMediaStreamSource(mediaStream),
+                        audioRecorder.processorNode = audioContext.createScriptProcessor(16384, audioRecorder.mediaStreamSource.channelCount, 0);
+                        audioRecorder.processorNode.onaudioprocess = (event) => {
+                            audioRecorder.buffers.push(event.inputBuffer);
+                        };
+                        audioRecorder.mediaStreamSource.connect(audioRecorder.processorNode);
+                        audioRecorder.mediaStreamSource.connect(audioContext.destination);
+                        document.getElementById('ProgressView').style = 'display: none;';
+                        document.getElementById('RecordingView').style = '';
+                    }).catch((error) => {
+                        showProgress('Could not get Microphone Access');
+                    });
+                };
+                document.getElementById('FileURL').onchange = (event) => {
+                    const url = event.target.value;
+                    if(url.length == 0)
+                        return;
+                    const xhr = new window.XMLHttpRequest();
+                    xhr.responseType = 'arraybuffer';
+                    decodeFile(xhr);
+                    xhr.open('GET', url);
+                    xhr.send();
+                };
+                document.getElementById('RecordingView').onsubmit = (event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    audioRecorder.mediaStreamSource.mediaStream.getAudioTracks()[0].stop();
+                    audioRecorder.mediaStreamSource.disconnect();
+                    audioBuffer = audioContext.createBuffer(audioRecorder.buffers[0].numberOfChannels, audioRecorder.buffers[0].length*audioRecorder.buffers.length, audioRecorder.buffers[0].sampleRate);
+                    for(let channelIndex = 0; channelIndex < audioRecorder.buffers[0].numberOfChannels; ++channelIndex) {
+                        const destination = audioBuffer.getChannelData(channelIndex);
+                        for(let bufferIndex = 0; bufferIndex < audioRecorder.buffers.length; ++bufferIndex) {
+                            const source = audioRecorder.buffers[bufferIndex].getChannelData(channelIndex);
+                            destination.set(source, audioRecorder.buffers[0].length*bufferIndex);
+                        }
+                    }
+                    audioRecorder = undefined;
+                    updateInputOptionsView();
+                    document.getElementById('RecordingView').style = 'display: none;';
+                    document.getElementById('InputOptionsView').style = '';
+                };
+                document.getElementById('InputOptionsView').onsubmit = analyzeSignal;
+                document.getElementById('ShowOptions').onclick = (event) => {
+                    document.getElementById('ShowOptions').style = 'display: none;';
+                    document.getElementById('OptionsView').style = '';
+                };
+                for(const id of ['DisplayFactor', 'DisplayGamma', 'DisplayScheme']) {
+                    const element = document.getElementById(id);
+                    element.oninput = (event) => {
+                        saveOption(id);
+                        setRendererParameter(id, options[id]);
+                        renderFrame(ccwt, options);
+                    };
+                    element.oninput();
+                }
+                document.getElementById('OptionsView').onsubmit = saveOptions;
+            };
+        </script>
+    </head>
+    <body>
+        <canvas id="Canvas" style="display: none;"></canvas>
+        <svg id="Spacer" xmlns="http://www.w3.org/2000/svg"></svg>
+        <svg id="Overlays" xmlns="http://www.w3.org/2000/svg">
+            <g id="OverlayOffset">
+                <path id="Marker" />
+                <g id="MusicOverlays"></g>
+            </g>
+        </svg>
+        <center>
+            <div id="StartView">
+                ⬇ Drop a File here ⬇<br/>
+                <br/>
+                or <input id="FileSelect" type="file"><label for="FileSelect" class="button">Upload a File</label> or <span id="StartRecording" class="button">Start Recording</span> or<br/>
+                <br/>
+                <input id="FileURL" type="text" placeholder="Download from an URL" style="width: 500px;">
+            </div>
+            <form id="RecordingView" style="display: none;">
+                <input type="submit" value="Done">
+            </form>
+            <form id="InputOptionsView" style="display: none;">
+                Channel <select id="InputChannel"></select>
+                from <input type="text" id="InputBegin">
+                to <input type="text" id="InputEnd"><br/>
+                <br/>
+                <input type="submit" value="Go">
+            </form>
+            <div id="ProgressView" style="display: none;">
+                <span id="Message"></span><br/>
+                <br/>
+                <progress id="Progress" value="0" max="1"></progress>
+            </div>
+        </center>
+        <div id="ShowOptions" class="button">Options</div>
+        <form id="OptionsView" style="display: none;">
+            <fieldset>
+                <legend>Frequency Band</legend>
+                <div class="row">
+                    <label for="FrequencyBandMin">Min</label>
+                    <input id="FrequencyBandMin" type="text"> Hz
+                </div>
+                <div class="row">
+                    <label for="FrequencyBandMax">Max</label>
+                    <input id="FrequencyBandMax" type="text"> Hz
+                </div>
+                <div class="row">
+                    <label for="FrequencyBandBasis">Basis</label>
+                    <input id="FrequencyBandBasis" type="text">
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>Dimensions</legend>
+                <div class="row">
+                    <label for="DimensionsPadding">Padding</label>
+                    <input id="DimensionsPadding" type="text"> ms
+                </div>
+                <div class="row">
+                    <label for="DimensionsTime">Time</label>
+                    <input id="DimensionsTime" type="text"> px/s
+                </div>
+                <div class="row">
+                    <label for="DimensionsFrequency">Frequency</label>
+                    <input id="DimensionsFrequency" type="text"> px
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>Display</legend>
+                <div class="row">
+                    <label for="DisplayFactor">Factor</label>
+                    <input id="DisplayFactor" type="range" min="0" max="3" step="0.1" basis="10">
+                </div>
+                <div class="row">
+                    <label for="DisplayGamma">Gamma</label>
+                    <input id="DisplayGamma" type="range" min="-1" max="1" step="0.1" basis="2">
+                </div>
+                <div class="row">
+                    <label for="DisplayScheme">Scheme</label>
+                    <select id="DisplayScheme">
+                        <option value="Magnitude">Magnitude</option>
+                        <option value="Polar">Polar</option>
+                        <option value="Real">Real</option>
+                        <option value="Imaginary">Imaginary</option>
+                        <option value="Complex">Complex</option>
+                    </select>
+                </div>
+                <div class="row">
+                    <label for="DisplayFormat">Format</label>
+                    <select id="DisplayFormat">
+                        <option value="Horizontal">Horizontal</option>
+                        <option value="Vertical">Vertical</option>
+                    </select>
+                </div>
+                <div class="row">
+                    <label for="DisplayMarker">Marker</label>
+                    <input type="checkbox" id="DisplayMarker">
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>Tools</legend>
+                <div class="row">
+                    <label for="ToolsMusicalKeyboard">Piano Scale</label>
+                    <input type="checkbox" id="ToolsMusicalKeyboard">
+                </div>
+                <div class="row">
+                    <label for="ToolsOvertones">Overtones</label>
+                    <input type="checkbox" id="ToolsOvertones">
+                </div>
+            </fieldset>
+            <br/>
+            <input type="submit" value="Ok">
+        </form>
+    </body>
+</html>
