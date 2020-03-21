@@ -1,5 +1,5 @@
 let module, wasm;
-const path = 'https://github.com/Lichtso/complex_continuous_wavelet_transform/releases/download/v0.1.0/ccwt.wasm',
+const path = 'ccwt.wasm',
       imports = {};
 imports.wbg = {};
 imports.wbg.__wbindgen_throw = function(arg0, arg1) {
