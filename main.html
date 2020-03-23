@@ -7,6 +7,7 @@
         <script type="module">
             import {getIndexOfFrequency, getFrequencyAtIndex, doCCWT} from './CCWT.js';
             import {gl, initRenderer, resizeCanvas, setRendererParameter, renderFrame} from'./Renderer.js';
+            import {startRecording, stopRecording} from'./Recorder.js';
 
             const audioContext = new (window.AudioContext || window.webkitAudioContext)(),
                   options = {
@@ -22,14 +23,14 @@
                 'DisplayFormat': 'Horizontal',
                 'DisplayMarker': true,
                 'ToolsMusicalKeyboard': true,
-                'ToolsOvertones': true,
+                'ToolsOvertones': true
             }, channelNames = {
                 '1': ['Mono'],
                 '2': ['L', 'R'],
                 '4': ['L', 'R', 'SL', 'SR'],
                 '6': ['L', 'R', 'C', 'LFE', 'SL', 'SR']
             };
-            let ccwt, audioRecorder, audioBuffer, audioBufferSource, playbackStartedAt;
+            let ccwt, audioBuffer, audioBufferSource, playbackStartedAt;
 
             function showProgress(message, value=0.0) {
                 document.getElementById('Message').innerText = message;
@@ -178,6 +179,8 @@
 
             function initCanvas() {
                 ccwt.playbackTime = ccwt.config.InputBegin;
+                for(const id of ['FrequencyBandMin', 'FrequencyBandMax', 'FrequencyBandBasis', 'DimensionsPadding', 'DimensionsTime', 'DimensionsFrequency'])
+                    document.getElementById(id).disabled = true;
                 const spacer = document.getElementById('Spacer');
                 spacer.onclick = (event) => {
                     if(audioBufferSource)
@@ -266,17 +269,6 @@
                     }
             }
 
-            function saveOptions(event) {
-                event.stopPropagation();
-                event.preventDefault();
-                for(const id in options)
-                    saveOption(id);
-                updateDisplayFormat();
-                renderFrame(ccwt, options);
-                document.getElementById('OptionsView').style = 'display: none;';
-                document.getElementById('ShowOptions').style = '';
-            }
-
             function updateScrollPosition() {
                 let offset = ccwt.playbackTime-ccwt.config.InputBegin;
                 if(options.DisplayFormat == 'Horizontal')
@@ -336,18 +328,11 @@
                 document.getElementById('StartRecording').onclick = (event) => {
                     document.getElementById('StartView').style = 'display: none;';
                     document.getElementById('ProgressView').style = '';
-                    navigator.mediaDevices.getUserMedia({'audio': true}).then((mediaStream) => {
-                        audioRecorder = {'buffers': []};
-                        audioRecorder.mediaStreamSource = audioContext.createMediaStreamSource(mediaStream),
-                        audioRecorder.processorNode = audioContext.createScriptProcessor(16384, audioRecorder.mediaStreamSource.channelCount, 0);
-                        audioRecorder.processorNode.onaudioprocess = (event) => {
-                            audioRecorder.buffers.push(event.inputBuffer);
-                        };
-                        audioRecorder.mediaStreamSource.connect(audioRecorder.processorNode);
-                        audioRecorder.mediaStreamSource.connect(audioContext.destination);
+                    startRecording(audioContext).then(() => {
                         document.getElementById('ProgressView').style = 'display: none;';
                         document.getElementById('RecordingView').style = '';
                     }).catch((error) => {
+                        console.log(error);
                         showProgress('Could not get Microphone Access');
                     });
                 };
@@ -364,17 +349,7 @@
                 document.getElementById('RecordingView').onsubmit = (event) => {
                     event.stopPropagation();
                     event.preventDefault();
-                    audioRecorder.mediaStreamSource.mediaStream.getAudioTracks()[0].stop();
-                    audioRecorder.mediaStreamSource.disconnect();
-                    audioBuffer = audioContext.createBuffer(audioRecorder.buffers[0].numberOfChannels, audioRecorder.buffers[0].length*audioRecorder.buffers.length, audioRecorder.buffers[0].sampleRate);
-                    for(let channelIndex = 0; channelIndex < audioRecorder.buffers[0].numberOfChannels; ++channelIndex) {
-                        const destination = audioBuffer.getChannelData(channelIndex);
-                        for(let bufferIndex = 0; bufferIndex < audioRecorder.buffers.length; ++bufferIndex) {
-                            const source = audioRecorder.buffers[bufferIndex].getChannelData(channelIndex);
-                            destination.set(source, audioRecorder.buffers[0].length*bufferIndex);
-                        }
-                    }
-                    audioRecorder = undefined;
+                    audioBuffer = stopRecording(audioContext);
                     updateInputOptionsView();
                     document.getElementById('RecordingView').style = 'display: none;';
                     document.getElementById('InputOptionsView').style = '';
@@ -384,16 +359,24 @@
                     document.getElementById('ShowOptions').style = 'display: none;';
                     document.getElementById('OptionsView').style = '';
                 };
-                for(const id of ['DisplayFactor', 'DisplayGamma', 'DisplayScheme']) {
+                for(const id in options) {
                     const element = document.getElementById(id);
                     element.oninput = (event) => {
                         saveOption(id);
                         setRendererParameter(id, options[id]);
+                        updateDisplayFormat();
                         renderFrame(ccwt, options);
                     };
-                    element.oninput();
+                    setRendererParameter(id, options[id]);
                 }
-                document.getElementById('OptionsView').onsubmit = saveOptions;
+                document.getElementById('OptionsView').onsubmit = (event) => {
+                    event.stopPropagation();
+                    event.preventDefault();
+                    for(const id in options)
+                        saveOption(id);
+                    document.getElementById('OptionsView').style = 'display: none;';
+                    document.getElementById('ShowOptions').style = '';
+                };
             };
         </script>
     </head>
